@@ -1,5 +1,14 @@
-import { prisma } from "../../lib/prisma.js";
-import { createUser, findUserByEmail } from "../service/auth.service.js";
+import jwt from "jsonwebtoken";
+import {
+  createUser,
+  findUserByEmail,
+  comparePasswords,
+  findUserById,
+} from "../service/auth.service.js";
+
+const ACCESS_TOKEN_SECRET = process.env.JWT_SECRET;
+const REFRESH_TOKEN_SECRET = process.env.JWT_REFRESH_SECRET;
+
 async function Register(req, res) {
   const { username, email, password } = req.body;
 
@@ -13,15 +22,13 @@ async function Register(req, res) {
       .json({ message: "password must be at least 6 characters" });
   }
 
-  const existingUser = await prisma.user.findUnique({
-    where: { email: email },
-  });
-
-  if (existingUser) {
-    return res.status(409).json({ message: "user already exists" });
-  }
-
   try {
+    const existingUser = await findUserByEmail(email);
+
+    if (existingUser) {
+      return res.status(409).json({ message: "user already exists" });
+    }
+
     const userCreated = await createUser({
       username,
       email,
@@ -29,14 +36,16 @@ async function Register(req, res) {
     });
 
     if (!userCreated) {
-      return res.status(401).json({ message: "" });
+      return res.status(401).json({ message: "user registration failed" });
     }
+
     return res.status(201).json({
       message: "user registered successfully",
     });
   } catch (error) {
+    console.error("Register error:", error);
     return res.status(500).json({
-      message: "something went worng",
+      message: "something went wrong",
     });
   }
 }
@@ -55,10 +64,45 @@ async function Login(req, res) {
       return res.status(401).json({ message: "user not found" });
     }
 
-    const userPassword = userFound.password;
+    const isValidPassword = await comparePasswords(
+      password,
+      userFound.password,
+    );
 
-    return res.status(201).json({
-      message: "user registered successfully",
+    if (!isValidPassword) {
+      return res.status(400).json({ message: "wrong password" });
+    }
+
+    const payload = {
+      id: userFound.id,
+      email: userFound.email,
+      username: userFound.username ?? userFound.name,
+    };
+
+    const accessToken = jwt.sign(payload, ACCESS_TOKEN_SECRET, {
+      expiresIn: "15m",
+    });
+
+    const refreshToken = jwt.sign(
+      {
+        id: userFound.id,
+        email: userFound.email,
+      },
+      REFRESH_TOKEN_SECRET,
+      {
+        expiresIn: "7d",
+      },
+    );
+
+    return res.status(200).json({
+      message: "login successful",
+      accessToken,
+      refreshToken,
+      user: {
+        id: userFound.id,
+        email: userFound.email,
+        username: userFound.username ?? userFound.name,
+      },
     });
   } catch (error) {
     console.error("Login error:", error);
@@ -66,4 +110,41 @@ async function Login(req, res) {
   }
 }
 
-export { Register, Login };
+async function RefreshToken(req, res) {
+  const refreshToken = req.header.authorization;
+
+  if (!refreshToken) {
+    return res.status(401).json({ message: "refresh token is required" });
+  }
+
+  try {
+    const decoded = jwt.verify(refreshToken, REFRESH_TOKEN_SECRET);
+    const userFound = await findUserById(decoded.id);
+
+    if (!userFound) {
+      return res.status(401).json({ message: "invalid refresh token" });
+    }
+
+    const accessToken = jwt.sign(
+      {
+        id: userFound.id,
+        email: userFound.email,
+        username: userFound.username ?? userFound.name,
+      },
+      ACCESS_TOKEN_SECRET,
+      { expiresIn: "15m" },
+    );
+
+    return res.status(200).json({
+      accessToken,
+      refreshToken,
+    });
+  } catch (error) {
+    console.error("Refresh token error:", error);
+    return res
+      .status(401)
+      .json({ message: "invalid or expired refresh token" });
+  }
+}
+
+export { Register, Login, RefreshToken };
